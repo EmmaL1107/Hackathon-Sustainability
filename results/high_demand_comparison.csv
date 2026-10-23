@@ -1,0 +1,12 @@
+metric,baseline,optimized,improvement_vs_baseline_pct
+Total electricity cost [$],1917.6555,1526.3529,20.41
+Total carbon emissions [kgCO2],7032.1299,5755.0363,18.16
+Cost per completed CU [$/CU],0.006746,0.005369,20.41
+Renewable utilization [%],82.83,99.23,19.8
+Renewable share of electricity [%],51.73,61.98,19.81
+Missed deadlines [count],7.0,8.0,-14.29
+Deadline miss rate [%],2.88,3.29,-14.24
+Avg completion delay [slots],0.35,2.51,-617.14
+Urgent service rate [%],100.0,100.0,0.0
+Completed workload [CU],284283.55,284283.55,0.0
+Optimization runtime [s],0.0005,0.0502,-9940.0

@@ -1,0 +1,12 @@
+============================= test session starts ==============================
+platform darwin -- Python 3.12.2, pytest-7.4.4, pluggy-1.0.0
+rootdir: /Users/emmali/Desktop/hackathon
+plugins: anyio-4.2.0
+collected 32 items
+
+tests/test_energy_balance.py .....                                       [ 15%]
+tests/test_metrics.py ........                                           [ 40%]
+tests/test_optimizer.py ...........                                      [ 75%]
+tests/test_workloads.py ........                                         [100%]
+
+============================== 32 passed in 6.75s ==============================
