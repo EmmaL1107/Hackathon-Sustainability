@@ -95,6 +95,8 @@ class Schedule:
     cost_terms: dict = field(default_factory=dict)
     runtime_s: float = 0.0
     tasks: WorkloadSet = None           # reference to task list (same order as x rows)
+    objective_mode: str = "weighted"    # "weighted" | "cost_primary" | "emissions_primary"
+    mode_info: dict = field(default_factory=dict)   # feasibility-relaxation details
 
     # ---- derived helpers ------------------------------------------------
     @property
@@ -159,7 +161,22 @@ class LPOptimizer:
                  w_deadline: float = config.W_DEADLINE,
                  w_urgent: float = config.W_URGENT,
                  battery_enabled: Optional[bool] = None,
-                 verbose: bool = False):
+                 verbose: bool = False,
+                 objective_mode: str = "weighted",
+                 urgent_completion_rate: float = 0.99,
+                 max_total_unmet_cu: float = 0.0):
+        """
+        objective_mode:
+            "weighted"          — original multi-objective (cost + carbon + penalties)
+            "cost_primary"      — minimize electricity cost subject to explicit
+                                  service constraints (urgent >= 99%, unmet <= epsilon)
+            "emissions_primary" — minimize carbon emissions subject to the same
+                                  service constraints
+
+        For primary modes, if the workload is infeasible the service constraints
+        are automatically relaxed to the minimum unavoidable shortfall (Phase 1
+        feasibility LP), and the relaxation is reported in mode_info.
+        """
         self.w_cost = w_cost
         self.w_carbon = w_carbon
         self.w_deadline = w_deadline
@@ -168,6 +185,9 @@ class LPOptimizer:
         if battery_enabled is None:
             battery_enabled = config.BATTERY_ENABLED
         self.battery_enabled = battery_enabled
+        self.objective_mode = objective_mode
+        self.urgent_completion_rate = urgent_completion_rate
+        self.max_total_unmet_cu = max_total_unmet_cu
 
     # ----------------------------------------------------------------
     def _build_variable_index(self, tasks: List[Task], n_slots: int):
@@ -193,13 +213,20 @@ class LPOptimizer:
                     y_start=y_start, bat=bat, n_vars=n_vars)
 
     # ----------------------------------------------------------------
-    def solve(self, data: ScenarioData) -> Schedule:
-        t0 = time.perf_counter()
+    def _build_common_lp(self, data: ScenarioData) -> dict:
+        """Build the shared LP structure (variables, equality constraints,
+        inequality constraints, bounds) that is identical across all objective
+        modes. Returns a dict with all matrices and index info.
+
+        This is the physical / structural LP: capacity, energy balance, task
+        completion (sum x + y = d), windows, renewable bounds, battery SoC.
+        The *objective* and *service constraints* are added by the caller.
+        """
         tasks = data.workload.tasks
         n_tasks = len(tasks)
         n_slots = data.n_slots
-        e_cu = config.KW_PER_CU * config.SLOT_HOURS           # kWh per CU
-        e_idle = config.IDLE_POWER_KW * config.SLOT_HOURS     # kWh per slot
+        e_cu = config.KW_PER_CU * config.SLOT_HOURS
+        e_idle = config.IDLE_POWER_KW * config.SLOT_HOURS
 
         idx = self._build_variable_index(tasks, n_slots)
         x_cols = idx["x_cols"]
@@ -207,26 +234,12 @@ class LPOptimizer:
         bat = idx["bat"]
         n_vars = idx["n_vars"]
 
-        # ------------------ objective vector c ----------------------
-        c = np.zeros(n_vars)
-        for s in range(n_slots):
-            c[g0 + s] = self.w_cost * data.price[s] \
-                        + self.w_carbon * (data.carbon[s] / 1000.0)
-        for ti, t in enumerate(tasks):
-            pen = self.w_deadline * t.penalty_per_cu
-            if t.is_urgent:
-                pen += self.w_urgent
-            c[y0 + ti] = pen
-
         # ------------------ equality constraints ---------------------
-        # (C5) task completion  sum x + y = d_t
-        # (C2) energy balance   e_cu*sum x + e_idle - g - r (+bat) = 0
-        # (C7) battery SoC
         eq_rows, eq_cols, eq_data = [], [], []
         eq_b = []
         row = 0
 
-        # task completion
+        # task completion  sum x + y = d_t
         for ti, t in enumerate(tasks):
             for s in t.window_slots:
                 eq_rows.append(row); eq_cols.append(x_cols[(ti, s)]); eq_data.append(1.0)
@@ -237,15 +250,15 @@ class LPOptimizer:
         # energy balance
         for s in range(n_slots):
             for ti, t in enumerate(tasks):
-                if s in t.window_slots:   # x_{t,s} contributes e_cu
+                if s in t.window_slots:
                     eq_rows.append(row); eq_cols.append(x_cols[(ti, s)])
                     eq_data.append(e_cu)
             eq_rows.append(row); eq_cols.append(g0 + s); eq_data.append(-1.0)
             eq_rows.append(row); eq_cols.append(r0 + s); eq_data.append(-1.0)
             if bat is not None:
-                eq_rows.append(row); eq_cols.append(bat[0] + s); eq_data.append(1.0)   # +charge
-                eq_rows.append(row); eq_cols.append(bat[1] + s); eq_data.append(-1.0)  # -discharge
-            eq_b.append(-e_idle)   # RHS: ... = -e_idle  (see module docstring)
+                eq_rows.append(row); eq_cols.append(bat[0] + s); eq_data.append(1.0)
+                eq_rows.append(row); eq_cols.append(bat[1] + s); eq_data.append(-1.0)
+            eq_b.append(-e_idle)
             row += 1
 
         # battery SoC dynamics
@@ -261,7 +274,7 @@ class LPOptimizer:
                 eq_rows.append(row); eq_cols.append(d_start + s)
                 eq_data.append(1.0 / config.ETA_DISCHARGE)
                 if s == 0:
-                    eq_b.append(soc_init_energy)   # soc_0 = init + ...
+                    eq_b.append(soc_init_energy)
                 else:
                     eq_rows.append(row); eq_cols.append(soc_start + s - 1)
                     eq_data.append(-1.0)
@@ -277,7 +290,7 @@ class LPOptimizer:
         ub_b = []
         urow = 0
 
-        # (C1) capacity  sum_t x <= cap_s
+        # capacity  sum_t x <= cap_s
         for s in range(n_slots):
             for ti, t in enumerate(tasks):
                 if s in t.window_slots:
@@ -299,14 +312,13 @@ class LPOptimizer:
 
         # ------------------ variable bounds --------------------------
         bounds = []
-        # x: [0, inf]
         for _ in x_cols:
             bounds.append((0, None))
-        for s in range(n_slots):                       # g
+        for s in range(n_slots):
             bounds.append((0, None))
-        for s in range(n_slots):                       # r
+        for s in range(n_slots):
             bounds.append((0, float(data.renewable[s])))
-        for _ in range(n_tasks):                      # y shortfall
+        for _ in range(n_tasks):
             bounds.append((0, None))
         if bat is not None:
             for _ in range(n_slots):
@@ -315,17 +327,62 @@ class LPOptimizer:
                 bounds.append((0, config.BATTERY_MAX_DISCHARGE_KW * config.SLOT_HOURS))
             cap = config.BATTERY_CAPACITY_KWH
             for _ in range(n_slots):
-                bounds.append((config.BATTERY_MIN_SOC * cap, config.BATTERY_MAX_SOC * cap if hasattr(config,'BATTERY_MAX_SOC') else cap))
+                bounds.append((config.BATTERY_MIN_SOC * cap,
+                               config.BATTERY_MAX_SOC * cap if hasattr(config, 'BATTERY_MAX_SOC') else cap))
                 bounds[-1] = (config.BATTERY_MIN_SOC * cap, cap)
 
-        # ------------------ solve ------------------------------------
-        res = linprog(
-            c, A_ub=A_ub, b_ub=b_ub, A_eq=A_eq, b_eq=b_eq,
-            bounds=bounds, method="highs",
+        return dict(
+            x_cols=x_cols, g_start=g0, r_start=r0, y_start=y0,
+            bat=bat, n_vars=n_vars, n_tasks=n_tasks, n_slots=n_slots,
+            A_eq=A_eq, b_eq=b_eq, A_ub=A_ub, b_ub=b_ub, bounds=bounds,
+        )
+
+    # ----------------------------------------------------------------
+    def _solve_lp(self, c: np.ndarray, common: dict,
+                  extra_constraints=None):
+        """Solve the LP with the given objective vector ``c`` and the shared
+        common constraints, optionally augmented with extra inequality rows.
+
+        ``extra_constraints`` is a list of ``(coef_dict, rhs)`` tuples where
+        ``coef_dict`` maps variable column indices to coefficients. Each tuple
+        becomes one row of ``A_ub @ x <= rhs``.
+        """
+        A_ub = common["A_ub"]
+        b_ub = common["b_ub"]
+        if extra_constraints:
+            n_vars = common["n_vars"]
+            rows, cols, data_vals, b_extra = [], [], [], []
+            for i, (coef_dict, rhs) in enumerate(extra_constraints):
+                for col, val in coef_dict.items():
+                    rows.append(i)
+                    cols.append(col)
+                    data_vals.append(val)
+                b_extra.append(rhs)
+            A_extra = sparse.csr_matrix(
+                (data_vals, (rows, cols)),
+                shape=(len(extra_constraints), n_vars))
+            A_ub = sparse.vstack([A_ub, A_extra], format="csr")
+            b_ub = np.concatenate([b_ub, np.array(b_extra, dtype=float)])
+
+        return linprog(
+            c, A_ub=A_ub, b_ub=b_ub,
+            A_eq=common["A_eq"], b_eq=common["b_eq"],
+            bounds=common["bounds"], method="highs",
             options={"disp": self.verbose, "presolve": True},
         )
 
-        runtime = time.perf_counter() - t0
+    # ----------------------------------------------------------------
+    def _extract_schedule(self, res, data: ScenarioData, common: dict,
+                          runtime: float, mode_info: dict = None,
+                          objective_mode: str = None) -> Schedule:
+        """Extract a Schedule from a linprog result."""
+        tasks = data.workload.tasks
+        n_tasks = common["n_tasks"]
+        n_slots = common["n_slots"]
+        x_cols = common["x_cols"]
+        g0, r0, y0 = common["g_start"], common["r_start"], common["y_start"]
+        bat = common["bat"]
+
         feasible = res.success
         status = res.message
 
@@ -342,19 +399,16 @@ class LPOptimizer:
                 bd = res.x[bat[1]:bat[1] + n_slots].copy()
                 soc = res.x[bat[2]:bat[2] + n_slots].copy()
         else:
-            # infeasible: return zeros, report shortfall = full demand
             g = np.zeros(n_slots)
             r = np.zeros(n_slots)
             y = np.array([t.workload_cu for t in tasks], dtype=float)
             bc = bd = soc = None
 
-        # clean tiny numerical dust
         x[x < 1e-7] = 0.0
         y[y < 1e-7] = 0.0
 
-        # cost breakdown (use actual realized values, weights applied)
         grid_cost = float((data.price * g).sum())
-        grid_carbon_g = float((data.carbon * g).sum())          # gCO2
+        grid_carbon_g = float((data.carbon * g).sum())
         deadline_pen = float(sum(t.penalty_per_cu * y[ti]
                                  for ti, t in enumerate(tasks)))
         urgent_short = float(sum(y[ti] for ti, t in enumerate(tasks)
@@ -387,7 +441,138 @@ class LPOptimizer:
             cost_terms=obj_terms,
             runtime_s=runtime,
             tasks=data.workload,
+            objective_mode=objective_mode or self.objective_mode,
+            mode_info=mode_info or {},
         )
+
+    # ----------------------------------------------------------------
+    def _weighted_objective(self, data: ScenarioData, common: dict) -> np.ndarray:
+        """Build the original multi-objective cost vector."""
+        n_slots = common["n_slots"]
+        n_vars = common["n_vars"]
+        g0, y0 = common["g_start"], common["y_start"]
+        tasks = data.workload.tasks
+        c = np.zeros(n_vars)
+        for s in range(n_slots):
+            c[g0 + s] = self.w_cost * data.price[s] \
+                        + self.w_carbon * (data.carbon[s] / 1000.0)
+        for ti, t in enumerate(tasks):
+            pen = self.w_deadline * t.penalty_per_cu
+            if t.is_urgent:
+                pen += self.w_urgent
+            c[y0 + ti] = pen
+        return c
+
+    # ----------------------------------------------------------------
+    def _solve_primary(self, data: ScenarioData, common: dict,
+                       t0: float) -> Schedule:
+        """Solve a *primary-objective* LP (cost or emissions) subject to
+        explicit service constraints, with automatic feasibility relaxation.
+
+        Three-phase approach:
+          Phase 1  — minimise total shortfall Σy_t → gives the minimum
+                     unavoidable total shortfall ``s_min``. If s_min exceeds
+                     the requested tolerance ``max_total_unmet_cu``, the
+                     constraint is relaxed to s_min (so we never impose an
+                     impossible completion constraint).
+          Phase 2  — minimise urgent shortfall Σy_t(urgent) subject to
+                     Σy_t ≤ epsilon_eff → gives the minimum unavoidable
+                     urgent shortfall ``u_min``. Same relaxation logic.
+          Phase 3  — minimise the primary objective (cost or emissions)
+                     subject to the (possibly relaxed) service constraints.
+        """
+        tasks = data.workload.tasks
+        n_tasks = common["n_tasks"]
+        n_vars = common["n_vars"]
+        y0 = common["y_start"]
+        g0 = common["g_start"]
+
+        # --- Phase 1: minimise total shortfall ---
+        c_p1 = np.zeros(n_vars)
+        for ti in range(n_tasks):
+            c_p1[y0 + ti] = 1.0
+        res1 = self._solve_lp(c_p1, common)
+        if res1.success:
+            s_min = float(res1.x[y0:y0 + n_tasks].sum())
+        else:
+            s_min = float(sum(t.workload_cu for t in tasks))
+
+        epsilon_eff = max(self.max_total_unmet_cu, s_min + 1e-4)
+        feasibility_relaxed = s_min > self.max_total_unmet_cu + 1e-6
+
+        # --- Phase 2: minimise urgent shortfall (given total ≤ epsilon_eff) ---
+        urgent_idx = [ti for ti, t in enumerate(tasks) if t.is_urgent]
+        urgent_total = float(sum(t.workload_cu for t in tasks if t.is_urgent))
+        u_min = 0.0
+        urgent_relaxed = False
+        if urgent_idx:
+            c_p2 = np.zeros(n_vars)
+            for ti in urgent_idx:
+                c_p2[y0 + ti] = 1.0
+            total_constraint = ({y0 + ti: 1.0 for ti in range(n_tasks)},
+                                epsilon_eff)
+            res2 = self._solve_lp(c_p2, common, extra_constraints=[total_constraint])
+            if res2.success:
+                u_min = float(sum(res2.x[y0 + ti] for ti in urgent_idx))
+            else:
+                u_min = urgent_total
+
+            urgent_eps = (1.0 - self.urgent_completion_rate) * urgent_total
+            urgent_eps_eff = max(urgent_eps, u_min + 1e-4)
+            urgent_relaxed = u_min > urgent_eps + 1e-6
+        else:
+            urgent_eps_eff = 0.0
+
+        # --- Phase 3: minimise the primary objective ---
+        c_p3 = np.zeros(n_vars)
+        if self.objective_mode == "cost_primary":
+            for s in range(data.n_slots):
+                c_p3[g0 + s] = data.price[s]
+        else:  # emissions_primary
+            for s in range(data.n_slots):
+                c_p3[g0 + s] = data.carbon[s] / 1000.0
+
+        extra = [({y0 + ti: 1.0 for ti in range(n_tasks)}, epsilon_eff)]
+        if urgent_idx:
+            extra.append(({y0 + ti: 1.0 for ti in urgent_idx}, urgent_eps_eff))
+        res3 = self._solve_lp(c_p3, common, extra_constraints=extra)
+
+        runtime = time.perf_counter() - t0
+        mode_info = {
+            "objective_mode": self.objective_mode,
+            "min_unavoidable_total_shortfall_cu": round(s_min, 4),
+            "epsilon_requested": self.max_total_unmet_cu,
+            "epsilon_effective": round(epsilon_eff, 4),
+            "feasibility_relaxed": feasibility_relaxed,
+            "min_unavoidable_urgent_shortfall_cu": round(u_min, 4),
+            "urgent_epsilon_requested_pct": round(
+                (1.0 - self.urgent_completion_rate) * 100, 2),
+            "urgent_epsilon_effective_cu": round(urgent_eps_eff, 4),
+            "urgent_feasibility_relaxed": urgent_relaxed,
+            "urgent_completion_rate_target": self.urgent_completion_rate,
+            "n_phases": 3,
+        }
+        return self._extract_schedule(res3, data, common, runtime,
+                                      mode_info=mode_info)
+
+    # ----------------------------------------------------------------
+    def solve(self, data: ScenarioData) -> Schedule:
+        t0 = time.perf_counter()
+        common = self._build_common_lp(data)
+
+        if self.objective_mode == "weighted":
+            c = self._weighted_objective(data, common)
+            res = self._solve_lp(c, common)
+            runtime = time.perf_counter() - t0
+            return self._extract_schedule(res, data, common, runtime)
+
+        elif self.objective_mode in ("cost_primary", "emissions_primary"):
+            return self._solve_primary(data, common, t0)
+
+        else:
+            raise ValueError(
+                f"Unknown objective_mode '{self.objective_mode}'. "
+                "Use 'weighted', 'cost_primary', or 'emissions_primary'.")
 
 
 # ---------------------------------------------------------------------------

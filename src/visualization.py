@@ -197,3 +197,154 @@ def fig_gantt(schedule, data, max_tasks: int = 40) -> plt.Figure:
               fontsize=8, loc="lower right")
     fig.tight_layout()
     return fig
+
+
+# ---------------------------------------------------------------------------
+# Sensitivity / robustness charts (Feedback 3)
+# ---------------------------------------------------------------------------
+def fig_sensitivity_sweep(df: pd.DataFrame) -> plt.Figure:
+    """Three-panel chart, one per swept parameter. For each panel, baseline
+    and optimized cost are plotted against the swept value."""
+    params = ["kw_per_cu", "renewable_scale", "price_scale"]
+    titles = {
+        "kw_per_cu": "Compute-to-power coefficient (kW per CU)",
+        "renewable_scale": "Renewable availability multiplier",
+        "price_scale": "Electricity price multiplier",
+    }
+    fig, axes = plt.subplots(1, 3, figsize=(13, 3.8))
+    for ax, p in zip(axes, params):
+        sub = df[df["parameter"] == p].sort_values("value")
+        ax.plot(sub["value"], sub["baseline_cost_usd"], "-o",
+                color=C_BASE, lw=2, ms=5, label="baseline")
+        ax.plot(sub["value"], sub["optimized_cost_usd"], "-s",
+                color=C_OPT, lw=2, ms=5, label="optimized")
+        # mark the baseline (default) value
+        bv = sub["baseline_value"].iloc[0]
+        ax.axvline(bv, color="gray", ls=":", lw=1, alpha=0.7)
+        ax.set_xlabel(p)
+        ax.set_ylabel("Cost [$]")
+        ax.set_title(titles[p], fontsize=10)
+        ax.grid(alpha=0.3)
+        ax.legend(fontsize=8)
+    fig.tight_layout()
+    return fig
+
+
+def fig_sensitivity_carbon(df: pd.DataFrame) -> plt.Figure:
+    """Same sweep, but carbon emissions."""
+    params = ["kw_per_cu", "renewable_scale", "price_scale"]
+    titles = {
+        "kw_per_cu": "Compute-to-power coefficient (kW per CU)",
+        "renewable_scale": "Renewable availability multiplier",
+        "price_scale": "Electricity price multiplier",
+    }
+    fig, axes = plt.subplots(1, 3, figsize=(13, 3.8))
+    for ax, p in zip(axes, params):
+        sub = df[df["parameter"] == p].sort_values("value")
+        ax.plot(sub["value"], sub["baseline_carbon_kg"], "-o",
+                color=C_BASE, lw=2, ms=5, label="baseline")
+        ax.plot(sub["value"], sub["optimized_carbon_kg"], "-s",
+                color=C_OPT, lw=2, ms=5, label="optimized")
+        bv = sub["baseline_value"].iloc[0]
+        ax.axvline(bv, color="gray", ls=":", lw=1, alpha=0.7)
+        ax.set_xlabel(p)
+        ax.set_ylabel("Carbon [kgCO2]")
+        ax.set_title(titles[p], fontsize=10)
+        ax.grid(alpha=0.3)
+        ax.legend(fontsize=8)
+    fig.tight_layout()
+    return fig
+
+
+def fig_forecast_error(df: pd.DataFrame) -> plt.Figure:
+    """Rolling-horizon cost degradation vs forecast perturbation level."""
+    fig, ax = plt.subplots(figsize=(8.5, 4.2))
+    ax.plot(df["perturbation_pct"], df["rh_cost_usd"], "-o",
+            color=C_OPT, lw=2, ms=6, label="Rolling horizon (forecast)")
+    ax.axhline(df["perfect_forecast_cost_usd"].iloc[0], color="#88419d",
+               ls="--", lw=1.5, label="Rolling horizon (perfect forecast)")
+    ax.axhline(df["full_horizon_optimum_cost_usd"].iloc[0], color=C_BASE,
+               ls=":", lw=1.5, label="Full-horizon LP optimum")
+    ax.set_xlabel("Forecast perturbation (%)")
+    ax.set_ylabel("Realized cost [$]")
+    ax.set_title("Rolling-horizon cost degradation vs forecast accuracy")
+    ax.grid(alpha=0.3)
+    ax.legend(fontsize=8)
+    fig.tight_layout()
+    return fig
+
+
+def fig_workload_flexibility(df: pd.DataFrame) -> plt.Figure:
+    """Cost reduction (%) for each workload profile."""
+    fig, axes = plt.subplots(1, 2, figsize=(11, 3.8))
+    x = np.arange(len(df))
+    wl = 0.4
+    axes[0].bar(x - wl/2, df["baseline_cost_usd"], wl,
+                color=C_BASE, label="baseline")
+    axes[0].bar(x + wl/2, df["optimized_cost_usd"], wl,
+                color=C_OPT, label="optimized")
+    axes[0].set_xticks(x)
+    axes[0].set_xticklabels(df["workload_profile"], rotation=15, ha="right", fontsize=9)
+    axes[0].set_ylabel("Cost [$]")
+    axes[0].set_title("Cost by workload profile")
+    axes[0].legend(fontsize=8); axes[0].grid(alpha=0.3, axis="y")
+
+    axes[1].bar(x - wl/2, df["baseline_carbon_kg"], wl,
+                color=C_BASE, label="baseline")
+    axes[1].bar(x + wl/2, df["optimized_carbon_kg"], wl,
+                color=C_OPT, label="optimized")
+    axes[1].set_xticks(x)
+    axes[1].set_xticklabels(df["workload_profile"], rotation=15, ha="right", fontsize=9)
+    axes[1].set_ylabel("Carbon [kgCO2]")
+    axes[1].set_title("Carbon by workload profile")
+    axes[1].legend(fontsize=8); axes[1].grid(alpha=0.3, axis="y")
+    fig.tight_layout()
+    return fig
+
+
+# ---------------------------------------------------------------------------
+# Per-category unmet work chart (Feedback 2)
+# ---------------------------------------------------------------------------
+def fig_unmet_by_category(bm, om) -> plt.Figure:
+    """Stacked bar chart of unmet CU per category for baseline vs optimized."""
+    fig, ax = plt.subplots(figsize=(8, 3.8))
+    labels = ["Baseline", "Optimized"]
+    urgent = [bm.unmet_urgent_cu, om.unmet_urgent_cu]
+    flex = [bm.unmet_flexible_cu, om.unmet_flexible_cu]
+    train = [bm.unmet_training_cu, om.unmet_training_cu]
+    x = np.arange(len(labels))
+    ax.bar(x, urgent, color=C_GRID, label="Urgent")
+    ax.bar(x, flex, bottom=urgent, color=C_OPT, label="Flexible")
+    ax.bar(x, train, bottom=np.array(urgent) + np.array(flex),
+           color=C_BAT, label="Training")
+    ax.set_xticks(x); ax.set_xticklabels(labels)
+    ax.set_ylabel("Unmet workload [CU]")
+    ax.set_title("Unmet workload by category")
+    ax.legend(fontsize=8); ax.grid(alpha=0.3, axis="y")
+    fig.tight_layout()
+    return fig
+
+
+# ---------------------------------------------------------------------------
+# Objective-mode comparison chart (Feedback 1)
+# ---------------------------------------------------------------------------
+def fig_objective_modes(df: pd.DataFrame) -> plt.Figure:
+    """Bar chart of cost & carbon by objective mode."""
+    fig, axes = plt.subplots(1, 2, figsize=(11, 3.8))
+    x = np.arange(len(df))
+    wl = 0.4
+    axes[0].bar(x, df["cost_usd"], color=[C_BASE] + [C_OPT]*(len(df)-1))
+    axes[0].set_xticks(x); axes[0].set_xticklabels(df["method"], rotation=15, ha="right", fontsize=8)
+    axes[0].set_ylabel("Cost [$]"); axes[0].set_title("Electricity cost by objective mode")
+    axes[0].grid(alpha=0.3, axis="y")
+    for i, v in enumerate(df["cost_usd"]):
+        axes[0].text(i, v, f"${v:.1f}", ha="center", va="bottom", fontsize=8)
+
+    axes[1].bar(x, df["carbon_kg"], color=[C_BASE] + [C_OPT]*(len(df)-1))
+    axes[1].set_xticks(x); axes[1].set_xticklabels(df["method"], rotation=15, ha="right", fontsize=8)
+    axes[1].set_ylabel("Carbon [kgCO2]"); axes[1].set_title("Carbon by objective mode")
+    axes[1].grid(alpha=0.3, axis="y")
+    for i, v in enumerate(df["carbon_kg"]):
+        axes[1].text(i, v, f"{v:.0f}", ha="center", va="bottom", fontsize=8)
+    fig.tight_layout()
+    return fig

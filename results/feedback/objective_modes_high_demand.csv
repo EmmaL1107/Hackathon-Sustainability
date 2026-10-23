@@ -1,0 +1,5 @@
+method,objective_mode,cost_usd,carbon_kg,missed,unmet_cu,unmet_urgent_cu,unmet_flexible_cu,unmet_training_cu,urgent_rate_pct,feasibility_relaxed,min_unavoidable_shortfall_cu
+Baseline,—,1917.6555,7032.1299,7,52145.1,0.0,5470.96,46674.12,100.0,False,0.0
+Optimized (weighted),weighted,1526.3529,5755.0363,8,52145.1,0.0,5470.96,46674.12,100.0,False,0.0
+Optimized (cost_primary),cost_primary,1526.3027,5760.1835,12,52145.1,632.71,11881.51,39630.86,99.0,True,52145.08
+Optimized (emissions_primary),emissions_primary,1765.69,5398.5168,9,52145.1,632.71,7632.17,43880.2,99.0,True,52145.08

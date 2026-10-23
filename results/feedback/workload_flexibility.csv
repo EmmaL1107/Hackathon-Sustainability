@@ -1,0 +1,4 @@
+baseline_cost_usd,optimized_cost_usd,cost_reduction_pct,baseline_carbon_kg,optimized_carbon_kg,carbon_reduction_pct,baseline_missed,optimized_missed,baseline_urgent_rate_pct,optimized_urgent_rate_pct,optimized_unmet_cu,optimized_runtime_s,optimized_feasible,workload_profile,profile_label,urgent_share,flexible_share,training_share,total_daily_cu
+455.0661,66.5736,85.37056484761226,2089.4984,352.7548,83.1177281590644,1,1,100.0,100.0,8372.1,0.0188,True,flexible,"Highly flexible (long deadlines, training-heavy)",0.1,0.4,0.5,120000.0
+453.7554,69.6148,84.65807789835668,2256.3621,367.8172,83.69866255066064,0,0,100.0,100.0,0.0,0.0184,True,balanced,Balanced (default config),0.2,0.45,0.35,120000.0
+621.4734,71.641,88.47239479598001,1897.0836,444.1305,76.5887755289224,0,0,100.0,100.0,0.0,0.0197,True,strict,"Strict (short deadlines, urgent-heavy)",0.4,0.35,0.25,120000.0

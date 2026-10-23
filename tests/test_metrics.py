@@ -83,4 +83,4 @@ def test_run_experiment_returns_all_pieces(normal_data):
     for key in ("baseline_schedule", "optimized_schedule",
                 "baseline_metrics", "optimized_metrics", "comparison"):
         assert key in res
-    assert res["comparison"].shape[0] == 11
+    assert res["comparison"].shape[0] == 16

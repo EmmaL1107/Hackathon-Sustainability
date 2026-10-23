@@ -276,6 +276,59 @@ def export_experiment(res: dict, out_prefix: str) -> None:
     res["comparison"].to_csv(out_prefix + "_comparison.csv", index=False)
 
 
+# ---------------------------------------------------------------------------
+# Objective-mode comparison (Feedback 1: weighted vs cost_primary vs emissions_primary)
+# ---------------------------------------------------------------------------
+def run_objective_comparison(scenario_name: str = "normal", seed: int = 42,
+                             battery_enabled: bool = False) -> pd.DataFrame:
+    """Run all three objective modes on the same scenario and return a
+    side-by-side comparison table.
+
+    Modes:
+      - weighted:          original multi-objective (cost + carbon + penalties)
+      - cost_primary:      minimize electricity cost subject to service constraints
+      - emissions_primary: minimize carbon emissions subject to service constraints
+    """
+    data = scn.get_scenario(scenario_name, seed=seed)
+    data.battery_enabled = battery_enabled
+    base_sched = baseline.schedule(data)
+    bm = compute_metrics(base_sched, data)
+    records = [{
+        "method": "Baseline",
+        "objective_mode": "—",
+        "cost_usd": bm.total_cost_usd,
+        "carbon_kg": bm.total_carbon_kg,
+        "missed": bm.missed_deadlines,
+        "unmet_cu": round(bm.unmet_urgent_cu + bm.unmet_flexible_cu + bm.unmet_training_cu, 1),
+        "unmet_urgent_cu": bm.unmet_urgent_cu,
+        "unmet_flexible_cu": bm.unmet_flexible_cu,
+        "unmet_training_cu": bm.unmet_training_cu,
+        "urgent_rate_pct": bm.urgent_service_rate_pct,
+        "feasibility_relaxed": False,
+        "min_unavoidable_shortfall_cu": 0.0,
+    }]
+    for mode in ["weighted", "cost_primary", "emissions_primary"]:
+        opt = LPOptimizer(battery_enabled=battery_enabled, objective_mode=mode)
+        sched = opt.solve(data)
+        m = compute_metrics(sched, data)
+        mi = sched.mode_info
+        records.append({
+            "method": f"Optimized ({mode})",
+            "objective_mode": mode,
+            "cost_usd": m.total_cost_usd,
+            "carbon_kg": m.total_carbon_kg,
+            "missed": m.missed_deadlines,
+            "unmet_cu": round(m.unmet_urgent_cu + m.unmet_flexible_cu + m.unmet_training_cu, 1),
+            "unmet_urgent_cu": m.unmet_urgent_cu,
+            "unmet_flexible_cu": m.unmet_flexible_cu,
+            "unmet_training_cu": m.unmet_training_cu,
+            "urgent_rate_pct": m.urgent_service_rate_pct,
+            "feasibility_relaxed": mi.get("feasibility_relaxed", False),
+            "min_unavoidable_shortfall_cu": mi.get("min_unavoidable_total_shortfall_cu", 0.0),
+        })
+    return pd.DataFrame(records)
+
+
 if __name__ == "__main__":
     print("=== single experiment (normal) ===")
     res = run_experiment("normal", seed=42)
@@ -283,3 +336,5 @@ if __name__ == "__main__":
     print("\n=== scenario sweep ===")
     df = run_all_scenarios()
     print(df.to_string(index=False))
+    print("\n=== objective-mode comparison (normal) ===")
+    print(run_objective_comparison("normal").to_string(index=False))
