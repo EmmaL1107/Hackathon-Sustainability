@@ -10,6 +10,12 @@ Built for **HackSHSID 2026 — Track 2**. The optimizer is a transparent
 **linear program** solved with HiGHS (via `scipy.optimize.linprog`), not a
 black-box ML model.
 
+**Primary deliverable** — the project outputs an interactive web dashboard
+(`streamlit run app.py` → http://localhost:8501). It is the front-end of the
+project: judges can run it, click through the 10 tabs below, change the
+scenario/seed/weights in the sidebar, and export CSVs of every result
+without reading any code.
+
 ---
 
 ## 1. Quick start
@@ -29,6 +35,26 @@ streamlit run app.py
 ```
 
 Open the dashboard at the URL Streamlit prints (default http://localhost:8501).
+
+### Dashboard tabs (the 10 sections of the web page)
+
+| Tab | What it shows |
+|---|---|
+| Overview | Headline KPIs, baseline-vs-optimized summary, method description |
+| Energy & Demand | Per-slot price, renewable generation, demand, capacity |
+| Scheduling Results | Optimized schedule: grid/renewable/battery per slot, task Gantt |
+| Algorithm Comparison | Baseline vs optimizer vs rolling horizon on the chosen scenario |
+| Scenario Testing | 8-scenario sweep, multi-seed variability |
+| Objective Modes | Weighted / cost-primary / emissions-primary side-by-side (Feedback 1) |
+| Sensitivity | KW_PER_CU / renewable / price sweeps + forecast-error + workload flexibility (Feedback 3) |
+| Service Analysis | Per-category unmet CU + miss-cause diagnosis (Feedback 2) |
+| Methodology | Three objective formulations, decision variables, constraints, assumptions |
+| Export | CSV downloads for every table, chart, and feedback experiment |
+
+The sidebar exposes the scenario selector, seed, the four objective weights
+(`w_cost`, `w_carbon`, `w_deadline`, `w_urgent`), and toggles for battery
+and forecast mode. Every chart and table is cached (`st.cache_data`) so
+re-running with new sidebar settings is responsive.
 
 ---
 
